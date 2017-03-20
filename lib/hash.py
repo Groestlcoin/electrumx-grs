@@ -28,9 +28,13 @@
 
 import hashlib
 import hmac
+import groestlcoin_hash
 
 from lib.util import bytes_to_int, int_to_bytes
 
+
+def groestlHash(x):
+    return groestlcoin_hash.getHash(x, len(x))
 
 def sha256(x):
     '''Simple wrapper of hashlib sha256.'''
@@ -143,7 +147,7 @@ class Base58(object):
         prefixes it.'''
         be_bytes = Base58.decode(txt)
         result, check = be_bytes[:-4], be_bytes[-4:]
-        if check != double_sha256(result)[:4]:
+        if check != groestlHash(result)[:4]:
             raise Base58Error('invalid base 58 checksum for {}'.format(txt))
         return result
 
@@ -153,5 +157,5 @@ class Base58(object):
         into a Base58Check string."""
         assert isinstance(payload, (bytes, bytearray, memoryview))
 
-        be_bytes = payload + double_sha256(payload)[:4]
+        be_bytes = payload + groestlHash(payload)[:4]
         return Base58.encode(be_bytes)

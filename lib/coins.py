@@ -37,7 +37,7 @@ from decimal import Decimal
 from hashlib import sha256
 
 import lib.util as util
-from lib.hash import Base58, hash160, double_sha256, hash_to_str
+from lib.hash import Base58, hash160, double_sha256, hash_to_str, groestlHash
 from lib.script import ScriptPubKey
 from lib.tx import Deserializer, DeserializerSegWit, DeserializerAuxPow, DeserializerZcash
 
@@ -310,6 +310,30 @@ class CoinAuxPow(Coin):
         block = DeserializerAuxPow(block)
         return block.read_header(height, cls.BASIC_HEADER_SIZE)
 
+
+class Groestlcoin(Coin):
+    NAME = "Groestlcoin"
+    SHORTNAME = "GRS"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488b21e")
+    XPRV_VERBYTES = bytes.fromhex("0488ade4")
+    GENESIS_HASH = ('00000ac5927c594d49cc0bdb81759d0d'
+                    'a8297eb614683d3acb62f0703b639023')
+    P2PKH_VERBYTE = bytes.fromhex("24")
+    P2SH_VERBYTE = bytes.fromhex("05")
+    WIF_BYTE = bytes.fromhex("80")
+
+    TX_COUNT = 1000000
+    TX_COUNT_HEIGHT = 1000000
+    TX_PER_BLOCK = 10
+
+    IRC_PREFIX = "E-grs_"
+    IRC_CHANNEL = "#Groestlcoin"
+
+    @classmethod
+    def header_hash(cls, header):
+        '''Given a header return the hash.'''
+        return groestlHash(header)
 
 class Bitcoin(Coin):
     NAME = "Bitcoin"

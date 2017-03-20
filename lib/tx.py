@@ -32,7 +32,7 @@ from collections import namedtuple
 from struct import unpack_from
 
 from lib.util import cachedproperty
-from lib.hash import double_sha256, hash_to_str
+from lib.hash import sha256, double_sha256, hash_to_str
 
 
 class Tx(namedtuple("Tx", "version inputs outputs locktime")):
@@ -104,7 +104,7 @@ class Deserializer(object):
             self._read_inputs(),    # inputs
             self._read_outputs(),   # outputs
             self._read_le_uint32()  # locktime
-        ), double_sha256(self.binary[start:self.cursor])
+        ), sha256(self.binary[start:self.cursor])
 
     def read_tx_block(self):
         '''Returns a list of (deserialized_tx, tx_hash) pairs.'''
@@ -237,7 +237,7 @@ class DeserializerSegWit(Deserializer):
         orig_ser += self.binary[start:self.cursor]
 
         return TxSegWit(version, marker, flag, inputs,
-                        outputs, witness, locktime), double_sha256(orig_ser)
+                        outputs, witness, locktime), sha256(orig_ser)
 
 
 class DeserializerAuxPow(Deserializer):
