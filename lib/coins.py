@@ -335,6 +335,10 @@ class Groestlcoin(Coin):
         '''Given a header return the hash.'''
         return groestlHash(header)
 
+    @classmethod
+    def deserializer(cls):
+        return DeserializerSegWit
+
 class Bitcoin(Coin):
     NAME = "Bitcoin"
     SHORTNAME = "BTC"
