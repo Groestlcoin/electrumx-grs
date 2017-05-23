@@ -326,9 +326,9 @@ class Groestlcoin(Coin):
     P2SH_VERBYTE = bytes.fromhex("05")
     WIF_BYTE = bytes.fromhex("80")
 
-    TX_COUNT = 1000000
-    TX_COUNT_HEIGHT = 1000000
-    TX_PER_BLOCK = 10
+    TX_COUNT = 115900
+    TX_COUNT_HEIGHT = 1601528
+    TX_PER_BLOCK = 5
 
     IRC_PREFIX = "E-grs_"
     IRC_CHANNEL = "#Groestlcoin"
