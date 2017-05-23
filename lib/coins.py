@@ -71,6 +71,9 @@ class Coin(object):
         '''Return a coin class given name and network.
 
         Raise an exception if unrecognised.'''
+        # Only Groestlcoin can be used with electrumx-grs.
+        if name.lower() != 'groestlcoin':
+            raise CoinError('Only Groestlcoin can be used with electrumx-grs.')
         req_attrs = ('TX_COUNT', 'TX_COUNT_HEIGHT', 'TX_PER_BLOCK',
                      'IRC_CHANNEL')
         for coin in util.subclasses(Coin):
