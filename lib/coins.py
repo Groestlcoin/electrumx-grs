@@ -332,6 +332,11 @@ class Groestlcoin(Coin):
 
     IRC_PREFIX = "E-grs_"
     IRC_CHANNEL = "#Groestlcoin"
+    RPC_PORT = 1441
+    PEERS = [
+        'electrum1.groestlcoin.org s t',
+        'electrum2.groestlcoin.org s t',
+    ]
 
     @classmethod
     def header_hash(cls, header):
