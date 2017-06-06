@@ -70,14 +70,14 @@ def main_loop():
 def main():
     '''Set up logging, enter main loop.'''
     logging.basicConfig(level=logging.INFO)
-    logging.info('ElectrumX server starting')
+    logging.info('ElectrumX-GRS server starting')
     try:
         main_loop()
     except Exception:
         traceback.print_exc()
-        logging.critical('ElectrumX server terminated abnormally')
+        logging.critical('ElectrumX-GRS server terminated abnormally')
     else:
-        logging.info('ElectrumX server terminated normally')
+        logging.info('ElectrumX-GRS server terminated normally')
 
 
 if __name__ == '__main__':
