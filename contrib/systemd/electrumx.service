@@ -1,11 +1,11 @@
 [Unit]
-Description=Electrumx
+Description=Electrumx-GRS
 After=network.target
 
 [Service]
-EnvironmentFile=/etc/electrumx.conf
+EnvironmentFile=/etc/electrumx-grs.conf
 ExecStart=/usr/local/bin/electrumx_server.py
-User=electrumx
+User=electrumx-grs
 LimitNOFILE=8192
 TimeoutStopSec=30min
 
