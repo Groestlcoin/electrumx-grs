@@ -2,43 +2,42 @@
 Prerequisites
 =============
 
-**ElectrumX** should run on any flavour of unix.  I have run it
+**ElectrumX-GRS** should run on any flavour of unix.  I have run it
 successfully on MaxOSX and DragonFlyBSD.  It won't run out-of-the-box
 on Windows, but the changes required to make it do so should be
 small - pull requests are welcome.
 
-================ ========================
-Package          Notes
-================ ========================
-Python3          ElectrumX uses asyncio.  Python version >= 3.5.3 is
-                 **required**.
-`aiohttp`_       Python library for asynchronous HTTP.  Version >=
-                 1.0 required; I am using 1.0.5.
-`pylru`_         Python LRU cache package.  I'm using 1.0.9.
-DB Engine        I use `plyvel`_ 0.9, a Python interface to LevelDB.
-                 A database engine package is required but others
-                 are supported (see **Database Engine** below).
-`IRC`_           Python IRC package.  Only required if you enable
-                 IRC; ElectrumX will happily serve clients that
-                 try to connect directly.  I use 15.0.4 but
-                 older versions likely are fine.
-`x11_hash`_      Only required for DASH.  Python X11 Hash package.  Only
-                 required if for Dash.  Version 1.4 tested.
-================ ========================
+================    ========================
+Package             Notes
+================    ========================
+Python3             ElectrumX-GRS uses asyncio.  Python version >= 3.5.3 is
+                    **required**.
+`aiohttp`_          Python library for asynchronous HTTP.  Version >=
+                    1.0 required; I am using 1.0.5.
+`pylru`_            Python LRU cache package.  I'm using 1.0.9.
+DB Engine           I use `plyvel`_ 0.9, a Python interface to LevelDB.
+                    A database engine package is required but others
+                    are supported (see **Database Engine** below).
+`IRC`_              Python IRC package.  Only required if you enable
+                    IRC; ElectrumX-GRS will happily serve clients that
+                    try to connect directly.  I use 15.0.4 but
+                    older versions likely are fine.
+`groestlcoin_hash`_ Python Groestlcoin Hash package.
+================    ========================
 
-You need to be running a non-pruning bitcoin daemon with::
+You need to be running a non-pruning groestlcoin daemon with::
 
   txindex=1
 
 set in its configuration file.  If you have an existing installation
-of bitcoind and have not previously set this you will need to reindex
+of groestlcoind and have not previously set this you will need to reindex
 the blockchain with::
 
-    bitcoind -reindex
+    groestlcoind -reindex
 
 which can take some time.
 
-While not a requirement for running ElectrumX, it is intended to be
+While not a requirement for running ElectrumX-GRS, it is intended to be
 run with supervisor software such as Daniel Bernstein's
 `daemontools`_, Gerald Pape's `runit`_ package or `systemd`.  These
 make administration of secure unix servers very easy, and I strongly
@@ -46,14 +45,14 @@ recommend you install one of these and familiarise yourself with them.
 The instructions below and sample run scripts assume `daemontools`;
 adapting to `runit` should be trivial for someone used to either.
 
-When building the database form the genesis block, ElectrumX has to
+When building the database form the genesis block, ElectrumX-GRS has to
 flush large quantities of data to disk and its DB.  You will have a
 better experience if the database directory is on an SSD than on an
-HDD.  Currently to around height 447,100 of the Bitcoin blockchain the
-final size of the leveldb database, and other ElectrumX file metadata
-comes to just over 18.7GB (17.5 GiB).  LevelDB needs a bit more for
+HDD.  Currently to around height 1,447,100 of the Groestlcoin blockchain the
+final size of the leveldb database, and other ElectrumX-GRS file metadata
+comes to just over 1.1GB (1.2 GiB).  LevelDB needs a bit more for
 brief periods, and the block chain is only getting longer, so I would
-recommend having at least 30-40GB of free space before starting.
+recommend having at least 2-4GB of free space before starting.
 
 Database Engine
 ===============
@@ -76,8 +75,8 @@ Install the prerequisites above.
 
 Check out the code from Github::
 
-    git clone https://github.com/kyuupichan/electrumx.git
-    cd electrumx
+    git clone https://github.com/groestlcoin/electrumx-grs.git
+    cd electrumx-grs
 
 You can install with `setup.py` or run the code from the source tree
 or a copy of it.
@@ -86,30 +85,30 @@ You should create a standard user account to run the server under;
 your own is probably adequate unless paranoid.  The paranoid might
 also want to create another user account for the daemontools logging
 process.  The sample scripts and these instructions assume it is all
-under one account which I have called *electrumx*.
+under one account which I have called *electrumx-grs*.
 
 Next create a directory where the database will be stored and make it
-writeable by the electrumx account.  I recommend this directory live
+writeable by the electrumx-grs account.  I recommend this directory live
 on an SSD::
 
     mkdir /path/to/db_directory
-    chown electrumx /path/to/db_directory
+    chown electrumx-grs /path/to/db_directory
 
 
 Process limits
 --------------
 
-You must ensure the ElectrumX process has a large open file limit.
+You must ensure the ElectrumX-GRS process has a large open file limit.
 During sync it should not need more than about 1,024 open files.  When
 serving it will use approximately 256 for LevelDB plus the number of
 incoming connections.  It is not unusual to have 1,000 to 2,000
 connections being served, so I suggest you set your open files limit
 to at least 2,500.
 
-Note that setting the limit in your shell does *NOT* affect ElectrumX
-unless you are invoking ElectrumX directly from your shell.  If you
+Note that setting the limit in your shell does *NOT* affect ElectrumX-GRS
+unless you are invoking ElectrumX-GRS directly from your shell.  If you
 are using `systemd`, you need to set it in the `.service` file (see
-`contrib/systemd/electrumx.service`_).
+`contrib/systemd/electrumx-grs.service`_).
 
 
 Using daemontools
@@ -119,31 +118,31 @@ Next create a daemontools service directory; this only holds symlinks
 (see daemontools documentation).  The `svscan` program will ensure the
 servers in the directory are running by launching a `supervise`
 supervisor for the server and another for its logging process.  You
-can run `svscan` under the *electrumx* account if that is the only one
+can run `svscan` under the *electrumx-grs* account if that is the only one
 involved (server and logger) otherwise it will need to run as root so
-that the user can be switched to electrumx.
+that the user can be switched to electrumx-grs.
 
 Assuming this directory is called `service`, you would do one of::
 
     mkdir /service       # If running svscan as root
-    mkdir ~/service      # As electrumx if running svscan as that a/c
+    mkdir ~/service      # As electrumx-grs if running svscan as that a/c
 
 Next create a directory to hold the scripts that the `supervise`
 process spawned by `svscan` will run - this directory must be readable
 by the `svscan` process.  Suppose this directory is called *scripts*,
 you might do::
 
-    mkdir -p ~/scripts/electrumx
+    mkdir -p ~/scripts/electrumx-grs
 
-Then copy the all sample scripts from the ElectrumX source tree there::
+Then copy the all sample scripts from the ElectrumX-GRS source tree there::
 
-    cp -R /path/to/repo/electrumx/contrib/daemontools ~/scripts/electrumx
+    cp -R /path/to/repo/electrumx-grs/contrib/daemontools ~/scripts/electrumx-grs
 
 This copies 3 things: the top level server run script, a log/ directory
 with the logger run script, an env/ directory.
 
 You need to configure the environment variables under env/ to your
-setup, as explained in `ENVIRONMENT.rst`_.  ElectrumX server currently
+setup, as explained in `ENVIRONMENT.rst`_.  ElectrumX-GRS server currently
 takes no command line arguments; all of its configuration is taken
 from its environment which is set up according to env/ directory (see
 'envdir' man page).  Finally you need to change the log/run script to
@@ -159,7 +158,7 @@ directory is still empty::
 svscan is now waiting for services to be added to the directory::
 
     cd ~/service
-    ln -s ~/scripts/electrumx electrumx
+    ln -s ~/scripts/electrumx-grs electrumx-grs
 
 Creating the symlink will kick off the server process almost immediately.
 You can see its logs with::
@@ -173,26 +172,26 @@ Using systemd
 This repository contains a sample systemd unit file that you can use to
 setup ElectrumX with systemd. Simply copy it to :code:`/etc/systemd/system`::
 
-    cp contrib/systemd/electrumx.service /etc/systemd/system/
+    cp contrib/systemd/electrumx-grs.service /etc/systemd/system/
 
 The sample unit file assumes that the repository is located at
-:code:`/home/electrumx/electrumx`. If that differs on your system, you need to
+:code:`/home/electrumx-grs/electrumx-grs`. If that differs on your system, you need to
 change the unit file accordingly.
 
-You need to set a few configuration variables in :code:`/etc/electrumx.conf`,
+You need to set a few configuration variables in :code:`/etc/electrumx-grs.conf`,
 see `ENVIRONMENT.rst`_ for the list of required variables.
 
-Now you can start ElectrumX using :code:`systemctl`::
+Now you can start ElectrumX-GRS using :code:`systemctl`::
 
-    systemctl start electrumx
+    systemctl start electrumx-grs
 
 You can use :code:`journalctl` to check the log output::
 
-    journalctl -u electrumx -f
+    journalctl -u electrumx-grs -f
 
-Once configured you may want to start ElectrumX at boot::
+Once configured you may want to start ElectrumX-GRS at boot::
 
-    systemctl enable electrumx
+    systemctl enable electrumx-grs
 
 **Warning**: systemd is aggressive in forcibly shutting down
 processes.  Depending on your hardware, ElectrumX can need several
