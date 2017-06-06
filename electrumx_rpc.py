@@ -59,7 +59,7 @@ def rpc_send_and_wait(port, method, params, timeout=15):
         except asyncio.TimeoutError:
             print('request timed out after {}s'.format(timeout))
     except OSError:
-        print('cannot connect - is ElectrumX catching up, not running, or '
+        print('cannot connect - is ElectrumX-GRS catching up, not running, or '
               'is {:d} the wrong RPC port?'.format(port))
     finally:
         loop.close()
@@ -67,7 +67,7 @@ def rpc_send_and_wait(port, method, params, timeout=15):
 
 def main():
     '''Send the RPC command to the server and print the result.'''
-    parser = argparse.ArgumentParser('Send electrumx an RPC command')
+    parser = argparse.ArgumentParser('Send electrumx-GRS an RPC command')
     parser.add_argument('-p', '--port', metavar='port_num', type=int,
                         help='RPC port number')
     parser.add_argument('command', nargs=1, default=[],
