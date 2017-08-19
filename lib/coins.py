@@ -360,7 +360,10 @@ class GroestlcoinTestnet(Groestlcoin):
 
     IRC_PREFIX = "E-tgrs_"
     RPC_PORT = 17766
-    PEERS = []
+    PEERS = [
+        'electrum-test1.groestlcoin.org s t',
+        'electrum-test2.groestlcoin.org s t',
+    ]
 
 class Bitcoin(Coin):
     NAME = "Bitcoin"
