@@ -347,6 +347,21 @@ class Groestlcoin(Coin):
     def deserializer(cls):
         return DeserializerSegWit
 
+class GroestlcoinTestnet(Groestlcoin):
+    SHORTNAME = "TGRS"
+    NET = "testnet"
+    XPUB_VERBYTES = bytes.fromhex("043587cf")
+    XPRV_VERBYTES = bytes.fromhex("04358394")
+    P2PKH_VERBYTE = bytes.fromhex("6f")
+    P2SH_VERBYTE = bytes.fromhex("c4")
+    WIF_BYTE = bytes.fromhex("ef")
+    GENESIS_HASH = ('000000ffbb50fc9898cdd36ec163e6ba'
+                    '23230164c0052a28876255b7dcf2cd36')
+
+    IRC_PREFIX = "E-tgrs_"
+    RPC_PORT = 17766
+    PEERS = []
+
 class Bitcoin(Coin):
     NAME = "Bitcoin"
     SHORTNAME = "BTC"
