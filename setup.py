@@ -12,10 +12,10 @@ setuptools.setup(
     # "groestlcoin_hash" package is required to sync GRS network.
     install_requires=['plyvel', 'pylru', 'irc', 'aiohttp >= 1', 'groestlcoin_hash'],
     dependency_links=['git+https://github.com/groestlcoin/groestlcoin-hash-python#egg=groestlcoin_hash'],
-    packages=setuptools.find_packages(),
+    packages=setuptools.find_packages(exclude=['tests']),
     description='ElectrumX-GRS Server',
     author='Kefkius',
-    author_email='kefkius@gmail.com',
+    author_email='kefkius@mail.com',
     license='MIT Licence',
     url='https://github.com/Groestlcoin/electrumx-grs',
     long_description='Server implementation for the Electrum wallet',

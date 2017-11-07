@@ -26,7 +26,7 @@
 
 import pytest
 
-from lib.coins import Litecoin, Bitcoin, Groestlcoin
+from lib.coins import Litecoin, BitcoinCash, Zcash, Groestlcoin
 from lib.hash import Base58
 
 addresses = [
@@ -54,7 +54,7 @@ def test_address_from_hash160(address):
     verbyte, hash_bytes = raw[:verlen], raw[verlen:]
     if coin.P2PKH_VERBYTE == verbyte:
         assert coin.P2PKH_address_from_hash160(bytes.fromhex(hash)) == addr
-    elif coin.P2SH_VERBYTE == verbyte:
+    elif verbyte in coin.P2SH_VERBYTES:
         assert coin.P2SH_address_from_hash160(bytes.fromhex(hash)) == addr
     else:
         raise Exception("Unknown version byte")

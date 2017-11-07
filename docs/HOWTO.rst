@@ -3,7 +3,7 @@ Prerequisites
 =============
 
 **ElectrumX-GRS** should run on any flavour of unix.  I have run it
-successfully on MaxOSX and DragonFlyBSD.  It won't run out-of-the-box
+successfully on MacOS and DragonFlyBSD.  It won't run out-of-the-box
 on Windows, but the changes required to make it do so should be
 small - pull requests are welcome.
 
@@ -45,7 +45,7 @@ recommend you install one of these and familiarise yourself with them.
 The instructions below and sample run scripts assume `daemontools`;
 adapting to `runit` should be trivial for someone used to either.
 
-When building the database form the genesis block, ElectrumX-GRS has to
+When building the database from the genesis block, ElectrumX-GRS has to
 flush large quantities of data to disk and its DB.  You will have a
 better experience if the database directory is on an SSD than on an
 HDD.  Currently to around height 1,447,100 of the Groestlcoin blockchain the
@@ -393,6 +393,19 @@ need to run your server with a different server name and a new
 certificate.  Therefore it's a good idea to make an offline backup
 copy of your certificate and key in case you need to restore them.
 
+Running on a privileged port
+============================
+
+You may choose to run electrumx on a different port than 50001 / 50002.
+If you choose a privileged port ( < 1024 ) it makes sense to make use of a iptables NAT rule.
+
+An example, which will forward Port 110 to the internal port 50002 follows:
+
+    iptables -t nat -A PREROUTING -p tcp --dport 110 -j DNAT --to-destination 127.0.0.1:50002
+
+You can then set the port as follows and advertise the service externally on the privileged port
+    REPORT_SSL_PORT=110
+
 
 .. _`ENVIRONMENT.rst`: https://github.com/kyuupichan/electrumx/blob/master/docs/ENVIRONMENT.rst
 .. _`contrib/systemd/electrumx.service`: https://github.com/kyuupichan/electrumx/blob/master/contrib/systemd/electrumx.service
@@ -402,6 +415,6 @@ copy of your certificate and key in case you need to restore them.
 .. _`pylru`: https://pypi.python.org/pypi/pylru
 .. _`IRC`: https://pypi.python.org/pypi/irc
 .. _`x11_hash`: https://pypi.python.org/pypi/x11_hash
-.. _`contrib/python3.6/python-3.6.sh`: https://github.com/kyuupichan/electrumx/blob/master/contrib/contrib/python3.6/python-3.6.sh
-.. _`contrib/raspberrypi3/install_electrumx.sh`: https://github.com/kyuupichan/electrumx/blob/master/contrib/contrib/raspberrypi3/install_electrumx.sh
-.. _`contrib/raspberrypi3/run_electrumx.sh`: https://github.com/kyuupichan/electrumx/blob/master/contrib/contrib/raspberrypi3/run_electrumx.sh
+.. _`contrib/python3.6/python-3.6.sh`: https://github.com/kyuupichan/electrumx/blob/master/contrib/python3.6/python-3.6.sh
+.. _`contrib/raspberrypi3/install_electrumx.sh`: https://github.com/kyuupichan/electrumx/blob/master/contrib/raspberrypi3/install_electrumx.sh
+.. _`contrib/raspberrypi3/run_electrumx.sh`: https://github.com/kyuupichan/electrumx/blob/master/contrib/raspberrypi3/run_electrumx.sh

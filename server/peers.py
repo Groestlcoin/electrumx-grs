@@ -7,7 +7,6 @@
 
 '''Peer management.'''
 
-import ast
 import asyncio
 import random
 import socket
@@ -24,7 +23,6 @@ from server.irc import IRC
 import server.version as version
 
 
-PEERS_FILE = 'peers'
 PEER_GOOD, PEER_STALE, PEER_NEVER, PEER_BAD = range(4)
 STALE_SECS = 24 * 3600
 WAKEUP_SECS = 300
@@ -42,6 +40,7 @@ def peers_from_env(env):
         'protocol_min': version.PROTOCOL_MIN,
         'protocol_max': version.PROTOCOL_MAX,
         'genesis_hash': env.coin.GENESIS_HASH,
+        'hash_function': 'sha256',
     }
 
     return [Peer(ident.host, features, 'env') for ident in env.identities]
@@ -83,7 +82,7 @@ class PeerSession(JSONSession):
         self.send_request(self.on_version, 'server.version',
                           [version.VERSION, proto_ver])
         self.send_request(self.on_features, 'server.features')
-        self.send_request(self.on_headers, 'blockchain.headers.subscribe')
+        self.send_request(self.on_height, 'blockchain.headers.subscribe')
         self.send_request(self.on_peers_subscribe, 'server.peers.subscribe')
 
     def connection_lost(self, exc):
@@ -123,8 +122,8 @@ class PeerSession(JSONSession):
                                  .format(hosts))
         self.close_if_done()
 
-    def on_headers(self, result, error):
-        '''Handle the response to the version message.'''
+    def on_height(self, result, error):
+        '''Handle the response to blockchain.headers.subscribe message.'''
         if error:
             self.failed = True
             self.log_error('blockchain.headers.subscribe returned an error')
@@ -132,7 +131,8 @@ class PeerSession(JSONSession):
             self.bad = True
             self.log_error('bad blockchain.headers.subscribe response')
         else:
-            our_height = self.peer_mgr.controller.bp.db_height
+            controller = self.peer_mgr.controller
+            our_height = controller.bp.db_height
             their_height = result.get('block_height')
             if not isinstance(their_height, int):
                 self.log_warning('invalid height {}'.format(their_height))
@@ -141,6 +141,32 @@ class PeerSession(JSONSession):
                 self.log_warning('bad height {:,d} (ours: {:,d})'
                                  .format(their_height, our_height))
                 self.bad = True
+
+            # Check prior header too in case of hard fork.
+            if not self.bad:
+                check_height = min(our_height, their_height)
+                self.send_request(self.on_header, 'blockchain.block.get_header',
+                                  [check_height])
+                self.expected_header = controller.electrum_header(check_height)
+        self.close_if_done()
+
+    def on_header(self, result, error):
+        '''Handle the response to blockchain.block.get_header message.
+        Compare hashes of prior header in attempt to determine if forked.'''
+        if error:
+            self.failed = True
+            self.log_error('blockchain.block.get_header returned an error')
+        elif not isinstance(result, dict):
+            self.bad = True
+            self.log_error('bad blockchain.block.get_header response')
+        else:
+            theirs = result.get('prev_block_hash')
+            ours = self.expected_header.get('prev_block_hash')
+            if ours != theirs:
+                self.log_error('our header hash {} and theirs {} differ'
+                               .format(ours, theirs))
+                self.bad = True
+
         self.close_if_done()
 
     def on_version(self, result, error):
@@ -148,9 +174,13 @@ class PeerSession(JSONSession):
         if error:
             self.failed = True
             self.log_error('server.version returned an error')
-        elif isinstance(result, str):
-            self.peer.server_version = result
-            self.peer.features['server_version'] = result
+        else:
+            # Protocol version 1.1 returns a pair with the version first
+            if isinstance(result, list) and len(result) == 2:
+                result = result[0]
+            if isinstance(result, str):
+                self.peer.server_version = result
+                self.peer.features['server_version'] = result
         self.close_if_done()
 
     def check_remote_peers(self):
@@ -216,7 +246,10 @@ class PeerManager(util.LoggedClass):
         self.env = env
         self.controller = controller
         self.loop = controller.loop
-        self.irc = IRC(env, self)
+        if env.irc and env.coin.IRC_PREFIX:
+            self.irc = IRC(env, self)
+        else:
+            self.irc = None
         self.myselves = peers_from_env(env)
         self.retry_event = asyncio.Event()
         # Peers have one entry per hostname.  Once connected, the
@@ -224,7 +257,6 @@ class PeerManager(util.LoggedClass):
         # IP address that was connected to.  Adding a peer will evict
         # any other peers with the same host name or IP address.
         self.peers = set()
-        self.onion_peers = []
         self.permit_onion_peer_time = time.time()
         self.proxy = SocksProxy(env.tor_proxy_host, env.tor_proxy_port,
                                 loop=self.loop)
@@ -382,7 +414,6 @@ class PeerManager(util.LoggedClass):
             peers.update(bucket_peers[:2])
 
         # Add up to 20% onion peers (but up to 10 is OK anyway)
-        onion_peers = onion_peers or self.onion_peers
         random.shuffle(onion_peers)
         max_onion = 50 if is_tor else max(10, len(peers) // 4)
 
@@ -390,58 +421,25 @@ class PeerManager(util.LoggedClass):
 
         return [peer.to_tuple() for peer in peers]
 
-    def serialize(self):
-        serialized_peers = [peer.serialize() for peer in self.peers
-                            if not peer.bad]
-        data = (1, serialized_peers)  # version 1
-        return repr(data)
-
-    def write_peers_file(self):
-        with util.open_truncate(PEERS_FILE) as f:
-            f.write(self.serialize().encode())
-        self.logger.info('wrote out {:,d} peers'.format(len(self.peers)))
-
-    def read_peers_file(self):
-        try:
-            with util.open_file(PEERS_FILE, create=True) as f:
-                data = f.read(-1).decode()
-        except Exception as e:
-            self.logger.error('error reading peers file {}'.format(e))
-        else:
-            if data:
-                version, items = ast.literal_eval(data)
-                if version == 1:
-                    peers = []
-                    for item in items:
-                        if 'last_connect' in item:
-                            item['last_good'] = item.pop('last_connect')
-                        try:
-                            peers.append(Peer.deserialize(item))
-                        except Exception:
-                            pass
-                    self.add_peers(peers, source='peers file', limit=None)
-
     def import_peers(self):
         '''Import hard-coded peers from a file or the coin defaults.'''
         self.add_peers(self.myselves)
-        coin_peers = self.env.coin.PEERS
-        self.onion_peers = [Peer.from_real_name(rn, 'coins.py')
-                            for rn in coin_peers if '.onion ' in rn]
 
-        # If we don't have many peers in the peers file, add
-        # hard-coded ones
-        self.read_peers_file()
-        if len(self.peers) < 5:
+        # Add the hard-coded ones unless only returning self
+        if self.env.peer_discovery != self.env.PD_SELF:
+            coin_peers = self.env.coin.PEERS
             peers = [Peer.from_real_name(real_name, 'coins.py')
                      for real_name in coin_peers]
             self.add_peers(peers, limit=None)
 
     def connect_to_irc(self):
         '''Connect to IRC if not disabled.'''
-        if self.env.irc and self.env.coin.IRC_PREFIX:
+        if self.irc:
             pairs = [(peer.real_name(), ident.nick_suffix) for peer, ident
                      in zip(self.myselves, self.env.identities)]
             self.ensure_future(self.irc.start(pairs))
+        elif self.env.irc:
+            self.logger.info('IRC is disabled for this coin')
         else:
             self.logger.info('IRC is disabled')
 
@@ -462,7 +460,7 @@ class PeerManager(util.LoggedClass):
           3) Retrying old peers at regular intervals.
         '''
         self.connect_to_irc()
-        if not self.env.peer_discovery:
+        if self.env.peer_discovery != self.env.PD_ON:
             self.logger.info('peer discovery is disabled')
             return
 
@@ -474,16 +472,12 @@ class PeerManager(util.LoggedClass):
         self.logger.info('beginning peer discovery; force use of proxy: {}'
                          .format(self.env.force_proxy))
 
-        try:
-            while True:
-                timeout = self.loop.call_later(WAKEUP_SECS,
-                                               self.retry_event.set)
-                await self.retry_event.wait()
-                self.retry_event.clear()
-                timeout.cancel()
-                await self.retry_peers()
-        finally:
-            self.write_peers_file()
+        while True:
+            timeout = self.loop.call_later(WAKEUP_SECS, self.retry_event.set)
+            await self.retry_event.wait()
+            self.retry_event.clear()
+            timeout.cancel()
+            await self.retry_peers()
 
     def is_coin_onion_peer(self, peer):
         '''Return true if this peer is a hard-coded onion peer.'''
@@ -529,8 +523,16 @@ class PeerManager(util.LoggedClass):
         else:
             create_connection = self.loop.create_connection
 
+        # Use our listening Host/IP for outgoing connections so our
+        # peers see the correct source.
+        host = self.env.cs_host(for_rpc=False)
+        if isinstance(host, list):
+            host = host[0]
+        local_addr = (host, None) if host else None
+
         protocol_factory = partial(PeerSession, peer, self, kind)
-        coro = create_connection(protocol_factory, peer.host, port, ssl=sslc)
+        coro = create_connection(protocol_factory, peer.host, port, ssl=sslc,
+                                 local_addr=local_addr)
         callback = partial(self.connection_done, peer, port_pairs)
         self.ensure_future(coro, callback)
 

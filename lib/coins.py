@@ -38,10 +38,16 @@ from hashlib import sha256
 
 import lib.util as util
 from lib.hash import Base58, hash160, double_sha256, hash_to_str, groestlHash
-from lib.script import ScriptPubKey
-from lib.tx import Deserializer, DeserializerSegWit, DeserializerAuxPow, DeserializerZcash
+from lib.script import ScriptPubKey, OpCodes
+from lib.tx import Deserializer, DeserializerSegWit, DeserializerAuxPow, \
+    DeserializerZcash, DeserializerTxTime, DeserializerReddcoin
+from server.block_processor import BlockProcessor
+import server.daemon as daemon
+from server.session import ElectrumX, DashElectrumX
 
-Block = namedtuple("Block", "header transactions")
+
+Block = namedtuple("Block", "raw header transactions")
+OP_RETURN = OpCodes.OP_RETURN
 
 
 class CoinError(Exception):
@@ -56,12 +62,18 @@ class Coin(object):
     RPC_URL_REGEX = re.compile('.+@(\[[0-9a-fA-F:]+\]|[^:]+)(:[0-9]+)?')
     VALUE_PER_COIN = 100000000
     CHUNK_SIZE = 2016
+    HASHX_LEN = 11
     BASIC_HEADER_SIZE = 80
     STATIC_BLOCK_HEADERS = True
+    SESSIONCLS = ElectrumX
+    DESERIALIZER = Deserializer
+    DAEMON = daemon.Daemon
+    BLOCK_PROCESSOR = BlockProcessor
+    XPUB_VERBYTES = bytes('????', 'utf-8')
+    XPRV_VERBYTES = bytes('????', 'utf-8')
     IRC_PREFIX = None
     IRC_SERVER = "irc.freenode.net"
     IRC_PORT = 6667
-    HASHX_LEN = 11
     # Peer discovery
     PEER_DEFAULT_PORTS = {'t': '50001', 's': '50002'}
     PEERS = []
@@ -74,12 +86,15 @@ class Coin(object):
         # Only Groestlcoin can be used with electrumx-grs.
         if name.lower() != 'groestlcoin':
             raise CoinError('Only Groestlcoin can be used with electrumx-grs.')
-        req_attrs = ('TX_COUNT', 'TX_COUNT_HEIGHT', 'TX_PER_BLOCK',
-                     'IRC_CHANNEL')
+        req_attrs = ['TX_COUNT', 'TX_COUNT_HEIGHT', 'TX_PER_BLOCK',
+                     'IRC_CHANNEL']
         for coin in util.subclasses(Coin):
             if (coin.NAME.lower() == name.lower() and
                     coin.NET.lower() == net.lower()):
-                missing = [attr for attr in req_attrs
+                coin_req_attrs = req_attrs.copy()
+                if coin.IRC_PREFIX is not None:
+                    coin_req_attrs.append('IRC_CHANNEL')
+                missing = [attr for attr in coin_req_attrs
                            if not hasattr(coin, attr)]
                 if missing:
                     raise CoinError('coin {} missing {} attributes'
@@ -121,9 +136,10 @@ class Coin(object):
 
     @classmethod
     def hashX_from_script(cls, script):
-        '''Returns a hashX from a script.'''
-        script = ScriptPubKey.hashX_script(script)
-        if script is None:
+        '''Returns a hashX from a script, or None if the script is provably
+        unspendable so the output can be dropped.
+        '''
+        if script and script[0] == OP_RETURN:
             return None
         return sha256(script).digest()[:cls.HASHX_LEN]
 
@@ -146,7 +162,7 @@ class Coin(object):
     def lookup_xverbytes(verbytes):
         '''Return a (is_xpub, coin_class) pair given xpub/xprv verbytes.'''
         # Order means BTC testnet will override NMC testnet
-        for coin in Coin.coin_classes():
+        for coin in util.subclasses(Coin):
             if verbytes == coin.XPUB_VERBYTES:
                 return True, coin
             if verbytes == coin.XPRV_VERBYTES:
@@ -173,7 +189,7 @@ class Coin(object):
     def P2SH_address_from_hash160(cls, hash160):
         '''Return a coin address given a hash160.'''
         assert len(hash160) == 20
-        return Base58.encode_check(cls.P2SH_VERBYTE + hash160)
+        return Base58.encode_check(cls.P2SH_VERBYTES[0] + hash160)
 
     @classmethod
     def multisig_address(cls, m, pubkeys):
@@ -216,13 +232,13 @@ class Coin(object):
 
         if verbyte == cls.P2PKH_VERBYTE:
             return ScriptPubKey.P2PKH_script(hash_bytes)
-        if verbyte == cls.P2SH_VERBYTE:
+        if verbyte in cls.P2SH_VERBYTES:
             return ScriptPubKey.P2SH_script(hash_bytes)
 
         raise CoinError('invalid address: {}'.format(address))
 
     @classmethod
-    def prvkey_WIF(cls, privkey_bytes, compressed):
+    def privkey_WIF(cls, privkey_bytes, compressed):
         '''Return the private key encoded in Wallet Import Format.'''
         payload = bytearray(cls.WIF_BYTE) + privkey_bytes
         if compressed:
@@ -260,13 +276,11 @@ class Coin(object):
         return block[:cls.static_header_len(height)]
 
     @classmethod
-    def block_full(cls, block, height):
-        '''Returns (header, [(deserialized_tx, tx_hash), ...]) given a
-        block and its height.'''
-        header = cls.block_header(block, height)
-        deserializer = cls.deserializer()
-        txs = deserializer(block[len(header):]).read_tx_block()
-        return Block(header, txs)
+    def block(cls, raw_block, height):
+        '''Return a Block namedtuple given a raw block and its height.'''
+        header = cls.block_header(raw_block, height)
+        txs = cls.DESERIALIZER(raw_block, start=len(header)).read_tx_block()
+        return Block(raw_block, header, txs)
 
     @classmethod
     def decimal_value(cls, value):
@@ -292,15 +306,10 @@ class Coin(object):
             'nonce': nonce,
         }
 
-    @classmethod
-    def deserializer(cls):
-        return Deserializer
 
-class CoinAuxPow(Coin):
-    # Set NAME and NET to avoid exception in Coin::lookup_coin_class
-    NAME = ''
-    NET = ''
+class AuxPowMixin(object):
     STATIC_BLOCK_HEADERS = False
+    DESERIALIZER = DeserializerAuxPow
 
     @classmethod
     def header_hash(cls, header):
@@ -310,8 +319,8 @@ class CoinAuxPow(Coin):
     @classmethod
     def block_header(cls, block, height):
         '''Return the AuxPow block header bytes'''
-        block = DeserializerAuxPow(block)
-        return block.read_header(height, cls.BASIC_HEADER_SIZE)
+        deserializer = cls.DESERIALIZER(block)
+        return deserializer.read_header(height, cls.BASIC_HEADER_SIZE)
 
 
 class Groestlcoin(Coin):
@@ -322,6 +331,7 @@ class Groestlcoin(Coin):
     XPRV_VERBYTES = bytes.fromhex("0488ade4")
     GENESIS_HASH = ('00000ac5927c594d49cc0bdb81759d0d'
                     'a8297eb614683d3acb62f0703b639023')
+    DESERIALIZER = DeserializerSegWit
     P2PKH_VERBYTE = bytes.fromhex("24")
     P2SH_VERBYTE = bytes.fromhex("05")
     WIF_BYTE = bytes.fromhex("80")
@@ -343,10 +353,6 @@ class Groestlcoin(Coin):
         '''Given a header return the hash.'''
         return groestlHash(header)
 
-    @classmethod
-    def deserializer(cls):
-        return DeserializerSegWit
-
 class GroestlcoinTestnet(Groestlcoin):
     SHORTNAME = "TGRS"
     NET = "testnet"
@@ -365,49 +371,67 @@ class GroestlcoinTestnet(Groestlcoin):
         'electrum-test2.groestlcoin.org s t',
     ]
 
-class Bitcoin(Coin):
-    NAME = "Bitcoin"
+class BitcoinMixin(object):
     SHORTNAME = "BTC"
     NET = "mainnet"
     XPUB_VERBYTES = bytes.fromhex("0488b21e")
     XPRV_VERBYTES = bytes.fromhex("0488ade4")
     P2PKH_VERBYTE = bytes.fromhex("00")
-    P2SH_VERBYTE = bytes.fromhex("05")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
     WIF_BYTE = bytes.fromhex("80")
     GENESIS_HASH = ('000000000019d6689c085ae165831e93'
                     '4ff763ae46a2a6c172b3f1b60a8ce26f')
-    TX_COUNT = 156335304
-    TX_COUNT_HEIGHT = 429972
-    TX_PER_BLOCK = 1800
-    IRC_PREFIX = "E_"
-    IRC_CHANNEL = "#electrum"
     RPC_PORT = 8332
+
+
+class BitcoinCash(BitcoinMixin, Coin):
+    NAME = "BitcoinCash"
+    SHORTNAME = "BCC"
+    TX_COUNT = 243631085
+    TX_COUNT_HEIGHT = 479636
+    TX_PER_BLOCK = 50
+    PEERS = [
+        'electroncash.bitcoinplug.com s t',
+        'electrum-abc.criptolayer.net s50012',
+        'electroncash.cascharia.com s50002',
+        'bcc.arihanc.com t52001 s52002',
+        'mash.1209k.com s t',
+        'bch.kokx.org s t',
+        'abc.vom-stausee.de t52001 s52002',
+        'abc1.hsmiths.com t60001 s60002',
+    ]
+
+
+class BitcoinSegwit(BitcoinMixin, Coin):
+    NAME = "BitcoinSegwit"
+    DESERIALIZER = DeserializerSegWit
+    TX_COUNT = 217380620
+    TX_COUNT_HEIGHT = 464000
+    TX_PER_BLOCK = 1800
     PEERS = [
         'btc.smsys.me s995',
-        'electrum.be s t',
-        'electrum.trouth.net p10000 s t',
+        'E-X.not.fyi s t',
+        'elec.luggs.co s443',
         'electrum.vom-stausee.de s t',
         'electrum3.hachre.de p10000 s t',
         'electrum.hsmiths.com s t',
         'erbium1.sytes.net s t',
-        'fdkbwjykvl2f3hup.onion p10000 s t',
-        'h.1209k.com p10000 s t',
         'helicarrier.bauerj.eu s t',
         'hsmiths4fyqlw5xw.onion s t',
+        'luggscoqbymhvnkp.onion t80',
         'ozahtqwp25chjdjd.onion s t',
         'us11.einfachmalnettsein.de s t',
         'ELEX01.blackpole.online s t',
     ]
 
 
-class BitcoinTestnet(Bitcoin):
+class BitcoinTestnetMixin(object):
     SHORTNAME = "XTN"
     NET = "testnet"
-    IRC_PREFIX = None
     XPUB_VERBYTES = bytes.fromhex("043587cf")
     XPRV_VERBYTES = bytes.fromhex("04358394")
     P2PKH_VERBYTE = bytes.fromhex("6f")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("ef")
     GENESIS_HASH = ('000000000933ea01ad0ee984209779ba'
                     'aec3ced90fa3f408719526f8d77f4943')
@@ -417,65 +441,68 @@ class BitcoinTestnet(Bitcoin):
     TX_PER_BLOCK = 21
     RPC_PORT = 18332
     PEER_DEFAULT_PORTS = {'t': '51001', 's': '51002'}
+
+
+class BitcoinCashTestnet(BitcoinTestnetMixin, Coin):
+    '''Bitcoin Testnet for Bitcoin Cash daemons.'''
+    NAME = "BitcoinCash"
+    PEERS = [
+        'electrum-testnet-abc.criptolayer.net s50112',
+    ]
+
+
+class BitcoinSegwitTestnet(BitcoinTestnetMixin, Coin):
+    '''Bitcoin Testnet for Core bitcoind >= 0.13.1.'''
+    NAME = "BitcoinSegwit"
+    DESERIALIZER = DeserializerSegWit
     PEERS = [
         'electrum.akinbo.org s t',
         'he36kyperp3kbuxu.onion s t',
-        'electrum-btc-testnet.petrkr.net s t',
-        'testnet.hsmiths.com t53011',
+        'testnet.hsmiths.com t53011 s53012',
         'hsmithsxurybd7uh.onion t53011 s53012',
-        'ELEX05.blackpole.online t52001 s52002',
+        'testnetnode.arihanc.com s t',
     ]
 
 
-class BitcoinTestnetSegWit(BitcoinTestnet):
-    '''Bitcoin Testnet for Core bitcoind >= 0.13.1.
-
-    Unfortunately 0.13.1 broke backwards compatibility of the RPC
-    interface's TX serialization, SegWit transactions serialize
-    differently than with earlier versions.  If you are using such a
-    bitcoind on testnet, you must use this class as your "COIN".
-    '''
-    NET = "testnet-segwit"
-
-    @classmethod
-    def deserializer(cls):
-        return DeserializerSegWit
+class BitcoinSegwitRegtest(BitcoinSegwitTestnet):
+    NAME = "BitcoinSegwit"
+    NET = "regtest"
+    GENESIS_HASH = ('0f9188f13cb7b2c71f2a335e3a4fc328'
+                    'bf5beb436012afca590b1a11466e2206')
+    PEERS= []
+    TX_COUNT = 1
+    TX_COUNT_HEIGHT = 1
 
 
-class BitcoinNolnet(Bitcoin):
+class BitcoinNolnet(BitcoinCash):
     '''Bitcoin Unlimited nolimit testnet.'''
-
     NET = "nolnet"
-    GENESIS_HASH = ('00000000e752e935119102b142b5c27a'
-                    '346a023532a42edcf7c8ffd0a22206e9')
+    GENESIS_HASH = ('0000000057e31bd2066c939a63b7b862'
+                    '3bd0f10d8c001304bdfc1a7902ae6d35')
+    PEERS = []
     REORG_LIMIT = 8000
-    TX_COUNT = 195106
-    TX_COUNT_HEIGHT = 24920
-    TX_PER_BLOCK = 8
-    IRC_PREFIX = "EN_"
+    TX_COUNT = 583589
+    TX_COUNT_HEIGHT = 8617
+    TX_PER_BLOCK = 50
     RPC_PORT = 28332
     PEER_DEFAULT_PORTS = {'t': '52001', 's': '52002'}
-    PEERS = [
-        '14.3.140.101 s t',
-    ]
 
 
 class Litecoin(Coin):
     NAME = "Litecoin"
     SHORTNAME = "LTC"
     NET = "mainnet"
-    XPUB_VERBYTES = bytes.fromhex("0488b21e")
-    XPRV_VERBYTES = bytes.fromhex("0488ade4")
+    XPUB_VERBYTES = bytes.fromhex("019d9cfe")
+    XPRV_VERBYTES = bytes.fromhex("019da462")
     P2PKH_VERBYTE = bytes.fromhex("30")
-    P2SH_VERBYTE = bytes.fromhex("05")
+    P2SH_VERBYTES = [bytes.fromhex("32"), bytes.fromhex("05")]
     WIF_BYTE = bytes.fromhex("b0")
     GENESIS_HASH = ('12a765e31ffd4059bada1e25190f6e98'
                     'c99d9714d334efa41a195a7e7e04bfe2')
+    DESERIALIZER = DeserializerSegWit
     TX_COUNT = 8908766
     TX_COUNT_HEIGHT = 1105256
     TX_PER_BLOCK = 10
-    IRC_CHANNEL = "#electrum-ltc"   # obsolete
-    IRC_PREFIX = None
     RPC_PORT = 9332
     REORG_LIMIT = 800
     PEERS = [
@@ -487,18 +514,14 @@ class Litecoin(Coin):
         'eywr5eubdbbe2laq.onion s50008 t50007',
     ]
 
-    @classmethod
-    def deserializer(cls):
-        return DeserializerSegWit
-
 
 class LitecoinTestnet(Litecoin):
     SHORTNAME = "XLT"
     NET = "testnet"
-    XPUB_VERBYTES = bytes.fromhex("043587cf")
-    XPRV_VERBYTES = bytes.fromhex("04358394")
+    XPUB_VERBYTES = bytes.fromhex("0436ef7d")
+    XPRV_VERBYTES = bytes.fromhex("0436f6e1")
     P2PKH_VERBYTE = bytes.fromhex("6f")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("3a"), bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("ef")
     GENESIS_HASH = ('4966625a4b2851d9fdee139e56211a0d'
                     '88575f59ed816ff5e6a63deb4e3e29a0')
@@ -514,14 +537,12 @@ class LitecoinTestnet(Litecoin):
     ]
 
 
-class Viacoin(CoinAuxPow):
+class Viacoin(AuxPowMixin, Coin):
     NAME="Viacoin"
     SHORTNAME = "VIA"
     NET = "mainnet"
-    XPUB_VERBYTES = bytes.fromhex("0488B21E")
-    XPRV_VERBYTES = bytes.fromhex("0488ADE4")
     P2PKH_VERBYTE = bytes.fromhex("47")
-    P2SH_VERBYTE = bytes.fromhex("21")
+    P2SH_VERBYTES = [bytes.fromhex("21")]
     WIF_BYTE = bytes.fromhex("c7")
     GENESIS_HASH = ('4e9b54001f9976049830128ec0331515'
                     'eaabe35a70970d79971da1539a400ba1')
@@ -543,10 +564,8 @@ class Viacoin(CoinAuxPow):
 class ViacoinTestnet(Viacoin):
     SHORTNAME = "TVI"
     NET = "testnet"
-    XPUB_VERBYTES = bytes.fromhex("043587CF")
-    XPRV_VERBYTES = bytes.fromhex("04358394")
     P2PKH_VERBYTE = bytes.fromhex("7f")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("ff")
     GENESIS_HASH = ('00000007199508e34a9ff81e6ec0c477'
                     'a4cccff2a4767a8eee39c11db367b008')
@@ -559,21 +578,18 @@ class ViacoinTestnet(Viacoin):
 
 class ViacoinTestnetSegWit(ViacoinTestnet):
     NET = "testnet-segwit"
-
-    @classmethod
-    def deserializer(cls):
-        return DeserializerSegWit
+    DESERIALIZER = DeserializerSegWit
 
 
 # Source: namecoin.org
-class Namecoin(CoinAuxPow):
+class Namecoin(AuxPowMixin, Coin):
     NAME = "Namecoin"
     SHORTNAME = "NMC"
     NET = "mainnet"
     XPUB_VERBYTES = bytes.fromhex("d7dd6370")
     XPRV_VERBYTES = bytes.fromhex("d7dc6e31")
     P2PKH_VERBYTE = bytes.fromhex("34")
-    P2SH_VERBYTE = bytes.fromhex("0d")
+    P2SH_VERBYTES = [bytes.fromhex("0d")]
     WIF_BYTE = bytes.fromhex("e4")
     GENESIS_HASH = ('000000000062b72c5e2ceb45fbc8587e'
                     '807c155b0da735e6483dfba2f0a9c770')
@@ -588,23 +604,21 @@ class NamecoinTestnet(Namecoin):
     NAME = "Namecoin"
     SHORTNAME = "XNM"
     NET = "testnet"
-    XPUB_VERBYTES = bytes.fromhex("043587cf")
-    XPRV_VERBYTES = bytes.fromhex("04358394")
     P2PKH_VERBYTE = bytes.fromhex("6f")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("ef")
     GENESIS_HASH = ('00000007199508e34a9ff81e6ec0c477'
                     'a4cccff2a4767a8eee39c11db367b008')
 
 
-class Dogecoin(CoinAuxPow):
+class Dogecoin(AuxPowMixin, Coin):
     NAME = "Dogecoin"
     SHORTNAME = "DOGE"
     NET = "mainnet"
     XPUB_VERBYTES = bytes.fromhex("02facafd")
     XPRV_VERBYTES = bytes.fromhex("02fac398")
     P2PKH_VERBYTE = bytes.fromhex("1e")
-    P2SH_VERBYTE = bytes.fromhex("16")
+    P2SH_VERBYTES = [bytes.fromhex("16")]
     WIF_BYTE = bytes.fromhex("9e")
     GENESIS_HASH = ('1a91e3dace36e2be3bf030a65679fe82'
                     '1aa1d6ef92e7c9902eb318182c355691')
@@ -620,10 +634,8 @@ class DogecoinTestnet(Dogecoin):
     NAME = "Dogecoin"
     SHORTNAME = "XDT"
     NET = "testnet"
-    XPUB_VERBYTES = bytes.fromhex("043587cf")
-    XPRV_VERBYTES = bytes.fromhex("04358394")
     P2PKH_VERBYTE = bytes.fromhex("71")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("f1")
     GENESIS_HASH = ('bb0a78264637406b6360aad926284d54'
                     '4d7049f45189db5664f3c4d07350559e')
@@ -639,7 +651,7 @@ class Dash(Coin):
     GENESIS_HASH = ('00000ffd590b1485b3caadc19b22e637'
                     '9c733355108f107a430458cdf3407ab6')
     P2PKH_VERBYTE = bytes.fromhex("4c")
-    P2SH_VERBYTE = bytes.fromhex("10")
+    P2SH_VERBYTES = [bytes.fromhex("10")]
     WIF_BYTE = bytes.fromhex("cc")
     TX_COUNT_HEIGHT = 569399
     TX_COUNT = 2157510
@@ -655,6 +667,8 @@ class Dash(Coin):
         'electrum.dash.siampm.com s t',
         'wl4sfwq2hwxnodof.onion s t',
     ]
+    SESSIONCLS = DashElectrumX
+    DAEMON = daemon.DashDaemon
 
     @classmethod
     def header_hash(cls, header):
@@ -671,7 +685,7 @@ class DashTestnet(Dash):
     GENESIS_HASH = ('00000bafbc94add76cb75e2ec9289483'
                     '7288a481e5c005f6563d91623bf8bc2c')
     P2PKH_VERBYTE = bytes.fromhex("8c")
-    P2SH_VERBYTE = bytes.fromhex("13")
+    P2SH_VERBYTES = [bytes.fromhex("13")]
     WIF_BYTE = bytes.fromhex("ef")
     TX_COUNT_HEIGHT = 101619
     TX_COUNT = 132681
@@ -684,14 +698,12 @@ class DashTestnet(Dash):
     ]
 
 
-class Argentum(CoinAuxPow):
+class Argentum(AuxPowMixin, Coin):
     NAME = "Argentum"
     SHORTNAME = "ARG"
     NET = "mainnet"
-    XPUB_VERBYTES = bytes.fromhex("0488b21e")
-    XPRV_VERBYTES = bytes.fromhex("0488ade4")
     P2PKH_VERBYTE = bytes.fromhex("17")
-    P2SH_VERBYTE = bytes.fromhex("05")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
     WIF_BYTE = bytes.fromhex("97")
     GENESIS_HASH = ('88c667bc63167685e4e4da058fffdfe8'
                     'e007e5abffd6855de52ad59df7bb0bb2')
@@ -706,10 +718,8 @@ class Argentum(CoinAuxPow):
 class ArgentumTestnet(Argentum):
     SHORTNAME = "XRG"
     NET = "testnet"
-    XPUB_VERBYTES = bytes.fromhex("043587cf")
-    XPRV_VERBYTES = bytes.fromhex("04358394")
     P2PKH_VERBYTE = bytes.fromhex("6f")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("ef")
     REORG_LIMIT = 2000
 
@@ -718,13 +728,12 @@ class DigiByte(Coin):
     NAME = "DigiByte"
     SHORTNAME = "DGB"
     NET = "mainnet"
-    XPUB_VERBYTES = bytes.fromhex("0488b21e")
-    XPRV_VERBYTES = bytes.fromhex("0488ade4")
     P2PKH_VERBYTE = bytes.fromhex("1E")
-    P2SH_VERBYTE = bytes.fromhex("05")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
     WIF_BYTE = bytes.fromhex("80")
     GENESIS_HASH = ('7497ea1b465eb39f1c8f507bc877078f'
                     'e016d6fcb6dfad3a64c98dcc6e1e8496')
+    DESERIALIZER = DeserializerSegWit
     TX_COUNT = 1046018
     TX_COUNT_HEIGHT = 1435000
     TX_PER_BLOCK = 1000
@@ -735,10 +744,8 @@ class DigiByte(Coin):
 
 class DigiByteTestnet(DigiByte):
     NET = "testnet"
-    XPUB_VERBYTES = bytes.fromhex("043587cf")
-    XPRV_VERBYTES = bytes.fromhex("04358394")
     P2PKH_VERBYTE = bytes.fromhex("6f")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("ef")
     GENESIS_HASH = ('b5dca8039e300198e5fe7cd23bdd1728'
                     'e2a444af34c447dbd0916fa3430a68c2')
@@ -752,35 +759,31 @@ class FairCoin(Coin):
     NAME = "FairCoin"
     SHORTNAME = "FAIR"
     NET = "mainnet"
-    XPUB_VERBYTES = bytes.fromhex("0488b21e")
-    XPRV_VERBYTES = bytes.fromhex("0488ade4")
     P2PKH_VERBYTE = bytes.fromhex("5f")
-    P2SH_VERBYTE = bytes.fromhex("24")
+    P2SH_VERBYTES = [bytes.fromhex("24")]
     WIF_BYTE = bytes.fromhex("df")
-    GENESIS_HASH = ('1f701f2b8de1339dc0ec908f3fb6e9b0'
-                    'b870b6f20ba893e120427e42bbc048d7')
+    GENESIS_HASH = ('beed44fa5e96150d95d56ebd5d262578'
+                    '1825a9407a5215dd7eda723373a0a1d7')
     BASIC_HEADER_SIZE = 108
-    TX_COUNT = 1000
-    TX_COUNT_HEIGHT = 1000
+    TX_COUNT = 505
+    TX_COUNT_HEIGHT = 470
     TX_PER_BLOCK = 1
     IRC_PREFIX = "E_"
     IRC_CHANNEL = "#fairlectrum"
     RPC_PORT = 40405
     PEER_DEFAULT_PORTS = {'t': '51811', 's': '51812'}
     PEERS = [
-        'fairlectrum.fair-coin.net s',
-        'fairlectrum.fair.to s',
+        'electrum.faircoin.world s',
+        'electrumfair.punto0.org s',
     ]
 
     @classmethod
-    def block_full(cls, block, height):
-        '''Returns (header, [(deserialized_tx, tx_hash), ...]) given a
-        block and its height.'''
-
+    def block(cls, raw_block, height):
+        '''Return a Block namedtuple given a raw block and its height.'''
         if height > 0:
-            return super().block_full(block, height)
+            return super().block(raw_block, height)
         else:
-            return Block(cls.block_header(block, height), [])
+            return Block(raw_block, cls.block_header(raw_block, height), [])
 
     @classmethod
     def electrum_header(cls, header, height):
@@ -801,15 +804,14 @@ class Zcash(Coin):
     NAME = "Zcash"
     SHORTNAME = "ZEC"
     NET = "mainnet"
-    XPUB_VERBYTES = bytes.fromhex("0488b21e")
-    XPRV_VERBYTES = bytes.fromhex("0488ade4")
     P2PKH_VERBYTE = bytes.fromhex("1CB8")
-    P2SH_VERBYTE = bytes.fromhex("1CBD")
+    P2SH_VERBYTES = [bytes.fromhex("1CBD")]
     WIF_BYTE = bytes.fromhex("80")
     GENESIS_HASH = ('00040fe8ec8471911baa1db1266ea15d'
                     'd06b4a8a5c453883c000b031973dce08')
     STATIC_BLOCK_HEADERS = False
     BASIC_HEADER_SIZE = 140 # Excluding Equihash solution
+    DESERIALIZER = DeserializerZcash
     TX_COUNT = 329196
     TX_COUNT_HEIGHT = 68379
     TX_PER_BLOCK = 5
@@ -836,29 +838,288 @@ class Zcash(Coin):
     @classmethod
     def block_header(cls, block, height):
         '''Return the block header bytes'''
-        block = DeserializerZcash(block)
-        return block.read_header(height, cls.BASIC_HEADER_SIZE)
-
-    @classmethod
-    def deserializer(cls):
-        return DeserializerZcash
+        deserializer = cls.DESERIALIZER(block)
+        return deserializer.read_header(height, cls.BASIC_HEADER_SIZE)
 
 
 class Einsteinium(Coin):
     NAME = "Einsteinium"
     SHORTNAME = "EMC2"
     NET = "mainnet"
-    # TODO add correct values for XPUB, XPRIV
-    XPUB_VERBYTES = bytes.fromhex("0488b21e")
-    XPRV_VERBYTES = bytes.fromhex("0488ade4")
     P2PKH_VERBYTE = bytes.fromhex("21")
-    P2SH_VERBYTE = bytes.fromhex("05")
-    WIF_BYTE = bytes.fromhex("a1")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
+    WIF_BYTE = bytes.fromhex("b0")
     GENESIS_HASH = ('4e56204bb7b8ac06f860ff1c845f03f9'
                     '84303b5b97eb7b42868f714611aed94b')
+    DESERIALIZER = DeserializerSegWit
     TX_COUNT = 2087559
     TX_COUNT_HEIGHT = 1358517
     TX_PER_BLOCK = 2
     IRC_PREFIX = "E_"
     IRC_CHANNEL = "#electrum-emc2"
     RPC_PORT = 41879
+    REORG_LIMIT = 2000
+
+
+class Blackcoin(Coin):
+    NAME = "Blackcoin"
+    SHORTNAME = "BLK"
+    NET = "mainnet"
+    P2PKH_VERBYTE = bytes.fromhex("19")
+    P2SH_VERBYTES = [bytes.fromhex("55")]
+    WIF_BYTE = bytes.fromhex("99")
+    GENESIS_HASH = ('000001faef25dec4fbcf906e6242621d'
+                    'f2c183bf232f263d0ba5b101911e4563')
+    DESERIALIZER = DeserializerTxTime
+    DAEMON = daemon.LegacyRPCDaemon
+    TX_COUNT = 4594999
+    TX_COUNT_HEIGHT = 1667070
+    TX_PER_BLOCK = 3
+    IRC_PREFIX = "E_"
+    IRC_CHANNEL = "#electrum-blk"
+    RPC_PORT = 15715
+    REORG_LIMIT = 5000
+    HEADER_HASH = None
+
+    @classmethod
+    def header_hash(cls, header):
+        '''Given a header return the hash.'''
+        if cls.HEADER_HASH is None:
+            import scrypt
+            cls.HEADER_HASH = lambda x: scrypt.hash(x, x, 1024, 1, 1, 32)
+
+        version, = struct.unpack('<I', header[:4])
+        if version > 6:
+            return super().header_hash(header)
+        else:
+            return cls.HEADER_HASH(header)
+
+
+class Bitbay(Coin):
+    NAME = "Bitbay"
+    SHORTNAME = "BAY"
+    NET = "mainnet"
+    P2PKH_VERBYTE = bytes.fromhex("19")
+    P2SH_VERBYTES = [bytes.fromhex("55")]
+    WIF_BYTE = bytes.fromhex("99")
+    GENESIS_HASH = ('0000075685d3be1f253ce777174b1594'
+                    '354e79954d2a32a6f77fe9cba00e6467')
+    DESERIALIZER = DeserializerTxTime
+    DAEMON = daemon.LegacyRPCDaemon
+    TX_COUNT = 4594999
+    TX_COUNT_HEIGHT = 1667070
+    TX_PER_BLOCK = 3
+    IRC_PREFIX = "E_"
+    IRC_CHANNEL = "#electrum-bay"
+    RPC_PORT = 19914
+    REORG_LIMIT = 5000
+    HEADER_HASH = None
+
+    @classmethod
+    def header_hash(cls, header):
+        '''Given a header return the hash.'''
+        if cls.HEADER_HASH is None:
+            import scrypt
+            cls.HEADER_HASH = lambda x: scrypt.hash(x, x, 1024, 1, 1, 32)
+
+        version, = struct.unpack('<I', header[:4])
+        if version > 6:
+            return super().header_hash(header)
+        else:
+            return cls.HEADER_HASH(header)
+
+
+
+class Peercoin(Coin):
+    NAME = "Peercoin"
+    SHORTNAME = "PPC"
+    NET = "mainnet"
+    P2PKH_VERBYTE = bytes.fromhex("37")
+    P2SH_VERBYTES = [bytes.fromhex("75")]
+    WIF_BYTE = bytes.fromhex("b7")
+    GENESIS_HASH = ('0000000032fe677166d54963b62a4677'
+                    'd8957e87c508eaa4fd7eb1c880cd27e3')
+    DESERIALIZER = DeserializerTxTime
+    DAEMON = daemon.LegacyRPCDaemon
+    TX_COUNT = 1207356
+    TX_COUNT_HEIGHT = 306425
+    TX_PER_BLOCK = 4
+    IRC_PREFIX = "E_"
+    IRC_CHANNEL = "#electrum-ppc"
+    RPC_PORT = 9902
+    REORG_LIMIT = 5000
+
+
+class Reddcoin(Coin):
+    NAME = "Reddcoin"
+    SHORTNAME = "RDD"
+    NET = "mainnet"
+    P2PKH_VERBYTE = bytes.fromhex("3d")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
+    WIF_BYTE = bytes.fromhex("bd")
+    GENESIS_HASH = ('b868e0d95a3c3c0e0dadc67ee587aaf9'
+                    'dc8acbf99e3b4b3110fad4eb74c1decc')
+    DESERIALIZER = DeserializerReddcoin
+    TX_COUNT = 5413508
+    TX_COUNT_HEIGHT = 1717382
+    TX_PER_BLOCK = 3
+    IRC_PREFIX = "E_"
+    IRC_CHANNEL = "#electrum-rdd"
+    RPC_PORT = 45443
+
+
+class Vertcoin(Coin):
+    NAME = "Vertcoin"
+    SHORTNAME = "VTC"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488B21E")
+    XPRV_VERBYTES = bytes.fromhex("0488ADE4")
+    P2PKH_VERBYTE = bytes.fromhex("47")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
+    WIF_BYTE = bytes.fromhex("80")
+    GENESIS_HASH = ('4d96a915f49d40b1e5c2844d1ee2dccb'
+                    '90013a990ccea12c492d22110489f0c4')
+    DESERIALIZER = DeserializerSegWit
+    TX_COUNT = 2383423
+    TX_COUNT_HEIGHT = 759076
+    TX_PER_BLOCK = 3
+    RPC_PORT = 5888
+    REORG_LIMIT = 1000
+
+
+class Monacoin(Coin):
+    NAME = "Monacoin"
+    SHORTNAME = "MONA"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488B21E")
+    XPRV_VERBYTES = bytes.fromhex("0488ADE4")
+    P2PKH_VERBYTE = bytes.fromhex("32")
+    P2SH_VERBYTES = [bytes.fromhex("37"), bytes.fromhex("05")]
+    WIF_BYTE = bytes.fromhex("B0")
+    GENESIS_HASH = ('ff9f1c0116d19de7c9963845e129f9ed'
+                    '1bfc0b376eb54fd7afa42e0d418c8bb6')
+    DESERIALIZER = DeserializerSegWit
+    TX_COUNT = 2568580
+    TX_COUNT_HEIGHT = 1029766
+    TX_PER_BLOCK = 2
+    RPC_PORT = 9402
+    REORG_LIMIT = 1000
+    PEERS = [
+        'electrumx.tamami-foundation.org s t',
+        'electrumx1.movsign.info t',
+        'electrumx2.movsign.info t',
+        'electrum-mona.bitbank.cc s t',
+    ]
+
+
+class Crown(AuxPowMixin, Coin):
+    NAME = "Crown"
+    SHORTNAME = "CRW"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488b21e")
+    XPRV_VERBYTES = bytes.fromhex("0488ade4")
+    P2PKH_VERBYTE = bytes.fromhex("00")
+    P2SH_VERBYTES = [bytes.fromhex("1c")]
+    WIF_BYTE = bytes.fromhex("80")
+    GENESIS_HASH = ('0000000085370d5e122f64f4ab19c686'
+                    '14ff3df78c8d13cb814fd7e69a1dc6da')
+    TX_COUNT = 13336629
+    TX_COUNT_HEIGHT = 1268206
+    TX_PER_BLOCK = 10
+    RPC_PORT = 9341
+    REORG_LIMIT = 1000
+
+
+class Fujicoin(Coin):
+    NAME = "Fujicoin"
+    SHORTNAME = "FJC"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488b21e")
+    XPRV_VERBYTES = bytes.fromhex("0488ade4")
+    P2PKH_VERBYTE = bytes.fromhex("24")
+    P2SH_VERBYTES = [bytes.fromhex("10")]
+    WIF_BYTE = bytes.fromhex("a4")
+    GENESIS_HASH = ('adb6d9cfd74075e7f91608add4bd2a2e'
+                    'a636f70856183086842667a1597714a0')
+    ESTIMATE_FEE = 0.001
+    RELAY_FEE = 0.001
+    DAEMON = daemon.FakeEstimateFeeDaemon
+    TX_COUNT = 170478
+    TX_COUNT_HEIGHT = 1521676
+    TX_PER_BLOCK = 1
+    RPC_PORT = 3776
+    REORG_LIMIT = 1000
+
+class Neblio(Coin):
+    NAME = "Neblio"
+    SHORTNAME = "NEBL"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488b21e")
+    XPRV_VERBYTES = bytes.fromhex("0488ade4")
+    P2PKH_VERBYTE = bytes.fromhex("35")
+    P2SH_VERBYTES = [bytes.fromhex("70")]
+    WIF_BYTE = bytes.fromhex("80")
+    GENESIS_HASH = ('7286972be4dbc1463d256049b7471c25'
+                    '2e6557e222cab9be73181d359cd28bcc')
+    DESERIALIZER = DeserializerTxTime
+    TX_COUNT = 23675
+    TX_COUNT_HEIGHT = 22785
+    TX_PER_BLOCK = 1
+    RPC_PORT = 6326
+    REORG_LIMIT = 1000
+    HEADER_HASH = None
+
+    @classmethod
+    def header_hash(cls, header):
+        '''Given a header return the hash.'''
+        if cls.HEADER_HASH is None:
+            import scrypt
+            cls.HEADER_HASH = lambda x: scrypt.hash(x, x, 1024, 1, 1, 32)
+
+        version, = struct.unpack('<I', header[:4])
+        if version > 6:
+            return super().header_hash(header)
+        else:
+            return cls.HEADER_HASH(header)
+
+class Bitzeny(Coin):
+    NAME = "Bitzeny"
+    SHORTNAME = "ZNY"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488b21e")
+    XPRV_VERBYTES = bytes.fromhex("0488ade4")
+    P2PKH_VERBYTE = bytes.fromhex("51")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
+    WIF_BYTE = bytes.fromhex("80")
+    GENESIS_HASH = ('000009f7e55e9e3b4781e22bd87a7cfa'
+                    '4acada9e4340d43ca738bf4e9fb8f5ce')
+    ESTIMATE_FEE = 0.001
+    RELAY_FEE = 0.001
+    DAEMON = daemon.FakeEstimateFeeDaemon
+    TX_COUNT = 1000
+    TX_COUNT_HEIGHT = 10000
+    TX_PER_BLOCK = 1
+    RPC_PORT = 9252
+    REORG_LIMIT = 1000
+
+class CanadaeCoin(AuxPowMixin, Coin):
+    NAME = "CanadaeCoin"
+    SHORTNAME = "CDN"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("0488b21e")
+    XPRV_VERBYTES = bytes.fromhex("0488ade4")
+    P2PKH_VERBYTE = bytes.fromhex("1C")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
+    WIF_BYTE = bytes.fromhex("9c")
+    GENESIS_HASH = ('863626dadaef221e2e2f30ff3dacae44'
+                    'cabdae9e0028058072181b3fb675d94a')
+    ESTIMATE_FEE = 0.0001
+    RELAY_FEE = 0.0001
+    DAEMON = daemon.FakeEstimateFeeDaemon
+    TX_COUNT = 3455905
+    TX_COUNT_HEIGHT = 3645419
+    TX_PER_BLOCK = 1
+    IRC_PREFIX = "E_"
+    IRC_CHANNEL="#electrum-cdn"
+    RPC_PORT = 34330
+    REORG_LIMIT = 1000

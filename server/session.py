@@ -13,6 +13,7 @@ from functools import partial
 
 from lib.hash import sha256, hash_to_str
 from lib.jsonrpc import JSONSession, RPCError, JSONRPCv2, JSONRPC
+import lib.util as util
 from server.daemon import DaemonError
 import server.version as version
 
@@ -34,8 +35,7 @@ class SessionBase(JSONSession):
         self.env = controller.env
         self.daemon = self.bp.daemon
         self.client = 'unknown'
-        self.client_version = (1)
-        self.protocol_version = '1.0'
+        self.client_version = (1, )
         self.anon_logs = self.env.anon_logs
         self.last_delay = 0
         self.txs_sent = 0
@@ -113,19 +113,8 @@ class ElectrumX(SessionBase):
         self.hashX_subs = {}
         self.mempool_statuses = {}
         self.chunk_indices = []
-        self.electrumx_handlers = {
-            'blockchain.address.subscribe': self.address_subscribe,
-            'blockchain.block.get_chunk': self.block_get_chunk,
-            'blockchain.headers.subscribe': self.headers_subscribe,
-            'blockchain.numblocks.subscribe': self.numblocks_subscribe,
-            'blockchain.script_hash.subscribe': self.script_hash_subscribe,
-            'blockchain.transaction.broadcast': self.transaction_broadcast,
-            'server.add_peer': self.add_peer,
-            'server.banner': self.banner,
-            'server.features': self.server_features,
-            'server.peers.subscribe': self.peers_subscribe,
-            'server.version': self.server_version,
-        }
+        self.protocol_version = None
+        self.set_protocol_handlers((1, 0))
 
     def sub_count(self):
         return len(self.hashX_subs)
@@ -164,7 +153,7 @@ class ElectrumX(SessionBase):
 
         for alias_status in changed:
             if len(alias_status[0]) == 64:
-                method = 'blockchain.script_hash.subscribe'
+                method = 'blockchain.scripthash.subscribe'
             else:
                 method = 'blockchain.address.subscribe'
             pairs.append((method, alias_status))
@@ -247,12 +236,12 @@ class ElectrumX(SessionBase):
         hashX = self.controller.address_to_hashX(address)
         return await self.hashX_subscribe(hashX, address)
 
-    async def script_hash_subscribe(self, script_hash):
+    async def scripthash_subscribe(self, scripthash):
         '''Subscribe to a script hash.
 
-        script_hash: the SHA256 hash of the script to subscribe to'''
-        hashX = self.controller.script_hash_to_hashX(script_hash)
-        return await self.hashX_subscribe(hashX, script_hash)
+        scripthash: the SHA256 hash of the script to subscribe to'''
+        hashX = self.controller.scripthash_to_hashX(scripthash)
+        return await self.hashX_subscribe(hashX, scripthash)
 
     def server_features(self):
         '''Returns a dictionary of server features.'''
@@ -288,14 +277,21 @@ class ElectrumX(SessionBase):
         minor, revision = divmod(minor, 10000)
         revision //= 100
         daemon_version = '{:d}.{:d}.{:d}'.format(major, minor, revision)
+        server_version = version.VERSION.split()[-1]
         for pair in [
-                ('$VERSION', version.VERSION),
+                ('$VERSION', version.VERSION), # legacy
+                ('$SERVER_VERSION', server_version),
+                ('$SERVER_SUBVERSION', version.VERSION),
                 ('$DAEMON_VERSION', daemon_version),
                 ('$DAEMON_SUBVERSION', network_info['subversion']),
                 ('$DONATION_ADDRESS', self.env.donation_address),
         ]:
             banner = banner.replace(*pair)
         return banner
+
+    def donation_address(self):
+        '''Return the donation address as a string, empty if there is none.'''
+        return self.env.donation_address
 
     async def banner(self):
         '''Return the server banner text.'''
@@ -330,11 +326,47 @@ class ElectrumX(SessionBase):
                                             in self.client.split('.'))
             except Exception:
                 pass
-        if protocol_version is not None:
-            self.protocol_version = protocol_version
-        return version.VERSION
+
+        # Find the highest common protocol version.  Disconnect if
+        # that protocol version in unsupported.
+        ptuple = util.protocol_version(protocol_version, version.PROTOCOL_MIN,
+                                       version.PROTOCOL_MAX)
+
+        # From protocol version 1.1, protocol_version cannot be omitted
+        if ptuple is None or (ptuple >= (1, 1) and protocol_version is None):
+            self.log_info('unsupported protocol version request {}'
+                          .format(protocol_version))
+            raise RPCError('unsupported protocol version: {}'
+                           .format(protocol_version), JSONRPC.FATAL_ERROR)
+
+        self.set_protocol_handlers(ptuple)
+
+        # The return value depends on the protocol version
+        if ptuple < (1, 1):
+            return version.VERSION
+        else:
+            return (version.VERSION, self.protocol_version)
 
     async def transaction_broadcast(self, raw_tx):
+        '''Broadcast a raw transaction to the network.
+
+        raw_tx: the raw transaction as a hexadecimal string'''
+        # This returns errors as JSON RPC errors, as is natural
+        try:
+            tx_hash = await self.daemon.sendrawtransaction([raw_tx])
+            self.txs_sent += 1
+            self.log_info('sent tx: {}'.format(tx_hash))
+            self.controller.sent_tx(tx_hash)
+            return tx_hash
+        except DaemonError as e:
+            error, = e.args
+            message = error['message']
+            self.log_info('sendrawtransaction: {}'.format(message),
+                          throttle=True)
+            raise RPCError('the transaction was rejected by network rules.'
+                           '\n\n{}\n[{}]'.format(message, raw_tx))
+
+    async def transaction_broadcast_1_0(self, raw_tx):
         '''Broadcast a raw transaction to the network.
 
         raw_tx: the raw transaction as a hexadecimal string'''
@@ -343,34 +375,78 @@ class ElectrumX(SessionBase):
         # the result field.  And the server shouldn't be doing the client's
         # user interface job here.
         try:
-            tx_hash = await self.daemon.sendrawtransaction([raw_tx])
-            self.txs_sent += 1
-            self.log_info('sent tx: {}'.format(tx_hash))
-            self.controller.sent_tx(tx_hash)
-            return tx_hash
-        except DaemonError as e:
-            error = e.args[0]
-            message = error['message']
-            self.log_info('sendrawtransaction: {}'.format(message),
-                          throttle=True)
+            return await self.transaction_broadcast(raw_tx)
+        except RPCError as e:
+            message = e.msg
             if 'non-mandatory-script-verify-flag' in message:
-                return (
+                message = (
                     'Your client produced a transaction that is not accepted '
                     'by the network any more.  Please upgrade to Electrum '
                     '2.5.1 or newer.'
                 )
 
-            return (
-                'The transaction was rejected by network rules.  ({})\n[{}]'
-                .format(message, raw_tx)
-            )
+            return message
+
+    def set_protocol_handlers(self, ptuple):
+        protocol_version = '.'.join(str(part) for part in ptuple)
+        if protocol_version == self.protocol_version:
+            return
+        self.protocol_version = protocol_version
+
+        controller = self.controller
+        handlers = {
+            'blockchain.address.get_balance': controller.address_get_balance,
+            'blockchain.address.get_history': controller.address_get_history,
+            'blockchain.address.get_mempool': controller.address_get_mempool,
+            'blockchain.address.listunspent': controller.address_listunspent,
+            'blockchain.address.subscribe': self.address_subscribe,
+            'blockchain.block.get_chunk': self.block_get_chunk,
+            'blockchain.block.get_header': controller.block_get_header,
+            'blockchain.estimatefee': controller.estimatefee,
+            'blockchain.headers.subscribe': self.headers_subscribe,
+            'blockchain.relayfee': controller.relayfee,
+            'blockchain.transaction.get_merkle':
+            controller.transaction_get_merkle,
+            'server.add_peer': self.add_peer,
+            'server.banner': self.banner,
+            'server.donation_address': self.donation_address,
+            'server.features': self.server_features,
+            'server.peers.subscribe': self.peers_subscribe,
+            'server.version': self.server_version,
+        }
+
+        if ptuple < (1, 1):
+            # Methods or semantics unique to 1.0 and earlier protocols
+            handlers.update({
+                'blockcahin.address.get_proof': controller.address_get_proof,
+                'blockchain.numblocks.subscribe': self.numblocks_subscribe,
+                'blockchain.utxo.get_address': controller.utxo_get_address,
+                'blockchain.transaction.broadcast':
+                self.transaction_broadcast_1_0,
+                'blockchain.transaction.get': controller.transaction_get_1_0,
+            })
+
+        if ptuple >= (1, 1):
+            # New handlers as of 1.1, or different semantics
+            handlers.update({
+                'blockchain.scripthash.get_balance':
+                controller.scripthash_get_balance,
+                'blockchain.scripthash.get_history':
+                controller.scripthash_get_history,
+                'blockchain.scripthash.get_mempool':
+                controller.scripthash_get_mempool,
+                'blockchain.scripthash.listunspent':
+                controller.scripthash_listunspent,
+                'blockchain.scripthash.subscribe': self.scripthash_subscribe,
+                'blockchain.transaction.broadcast': self.transaction_broadcast,
+                'blockchain.transaction.get': controller.transaction_get,
+            })
+
+        self.electrumx_handlers = handlers
 
     def request_handler(self, method):
         '''Return the async handler for the given request method.'''
-        handler = self.electrumx_handlers.get(method)
-        if not handler:
-            handler = self.controller.electrumx_handlers.get(method)
-        return handler
+        return self.electrumx_handlers.get(method)
 
 
 class LocalRPC(SessionBase):
@@ -380,7 +456,79 @@ class LocalRPC(SessionBase):
         super().__init__(*args, **kwargs)
         self.client = 'RPC'
         self.max_send = 0
+        self.protocol_version = 'RPC'
 
     def request_handler(self, method):
         '''Return the async handler for the given request method.'''
         return self.controller.rpc_handlers.get(method)
+
+
+class DashElectrumX(ElectrumX):
+    '''A TCP server that handles incoming Electrum Dash connections.'''
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mns = set()
+
+    def set_protocol_handlers(self, ptuple):
+        super().set_protocol_handlers(ptuple)
+        mna_broadcast = (self.masternode_announce_broadcast if ptuple >= (1, 1)
+                         else self.masternode_announce_broadcast_1_0)
+        self.electrumx_handlers.update({
+            'masternode.announce.broadcast': mna_broadcast,
+            'masternode.subscribe': self.masternode_subscribe,
+        })
+
+    async def notify(self, height, touched):
+        '''Notify the client about changes in masternode list.'''
+        await super().notify(height, touched)
+
+        for masternode in self.mns:
+            status = await self.daemon.masternode_list(['status', masternode])
+            payload = {
+                'id': None,
+                'method': 'masternode.subscribe',
+                'params': [masternode],
+                'result': status.get(masternode),
+            }
+            self.send_binary(self.encode_payload(payload))
+
+    def server_version(self, client_name=None, protocol_version=None):
+        '''Returns the server version as a string.
+        Force version string response for Electrum-Dash 2.6.4 client caused by
+        https://github.com/dashpay/electrum-dash/commit/638cf6c0aeb7be14a85ad98f873791cb7b49ee29
+        '''
+        default_return = super().server_version(client_name, protocol_version)
+        if self.client == '2.6.4':
+            return '1.0'
+        return default_return
+
+    # Masternode command handlers
+    async def masternode_announce_broadcast(self, signmnb):
+        '''Pass through the masternode announce message to be broadcast
+        by the daemon.'''
+        try:
+            return await self.daemon.masternode_broadcast(['relay', signmnb])
+        except DaemonError as e:
+            error, = e.args
+            message = error['message']
+            self.log_info('masternode_broadcast: {}'.format(message))
+            raise RPCError('the masternode broadcast was rejected.'
+                           '\n\n{}\n[{}]'.format(message, signmnb))
+
+    async def masternode_announce_broadcast_1_0(self, signmnb):
+        '''Pass through the masternode announce message to be broadcast
+        by the daemon.'''
+        # An ugly API, like the old Electrum transaction broadcast API
+        try:
+            return await self.masternode_announce_broadcast(signmnb)
+        except RPCError as e:
+            return e.msg
+
+    async def masternode_subscribe(self, vin):
+        '''Returns the status of masternode.'''
+        result = await self.daemon.masternode_list(['status', vin])
+        if result is not None:
+            self.mns.add(vin)
+            return result.get(vin)
+        return None

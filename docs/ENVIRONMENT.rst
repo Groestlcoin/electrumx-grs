@@ -8,10 +8,20 @@ given, the rest will have sensible defaults if not specified.  Many of
 the defaults around resource usage are conservative; I encourage you
 to review them.
 
+Note: by default the server will only serve to connections from the
+same machine.  To be accessible to other users across the internet you
+must set **HOST** appropriately; see below.
+
+
 Required
 --------
 
 These environment variables are always required:
+
+* **COIN**
+
+  Must be a *NAME* from one of the **Coin** classes in
+  `lib/coins.py`_.
 
 * **DB_DIRECTORY**
 
@@ -48,23 +58,20 @@ The following are required if you use the `run` script:
 
   The username the server will run as.
 
+
 Miscellaneous
 -------------
 
 These environment variables are optional:
 
-* **COIN**
+* **ALLOW_ROOT**
 
-  Must be a *NAME* from one of the **Coin** classes in
-  `lib/coins.py`_.  Defaults to `Bitcoin`.
+  Set this environment variable to anything non-empty to allow running ElectrumX as root.
 
 * **NET**
 
   Must be a *NET* from one of the **Coin** classes in `lib/coins.py`_.
   Defaults to `mainnet`.
-
-  Note Bitcoin Core >= 0.13.1 requires a special *NET* for testnet:
-  `testnet-segwit`.
 
 * **DB_ENGINE**
 
@@ -73,17 +80,13 @@ These environment variables are optional:
   install the appropriate python package for your engine.  The value
   is not case sensitive.
 
-* **REORG_LIMIT**
-
-  The maximum number of blocks to be able to handle in a chain
-  reorganisation.  ElectrumX retains some fairly compact undo
-  information for this many blocks in levelDB.  The default is a
-  function of **COIN** and **NET**; for Bitcoin mainnet it is 200.
-
 * **HOST**
 
-  The host that the TCP and SSL servers will use.  Defaults to
-  `localhost`.  Set to blank to listen on all addresses (IPv4 and IPv6).
+  The host or IP address that the TCP and SSL servers will use when
+  binding listening sockets.  Defaults to `localhost`.  To listen on
+  multiple specific addresses specify a comma-separated list.  Set to
+  an empty string to listen on all available interfaces (likely both
+  IPv4 and IPv6).
 
 * **TCP_PORT**
 
@@ -95,12 +98,25 @@ These environment variables are optional:
   If set then SSL_CERTFILE and SSL_KEYFILE must be defined and be
   filesystem paths to those SSL files.
 
+* **RPC_HOST**
+
+  The host or IP address that the RPC server will listen on and
+  defaults to `localhost`.  To listen on multiple specific addresses
+  specify a comma-separated list.  Servers with unusual networking
+  setups might want to specify e.g. `::1` or `127.0.0.1` explicitly
+  rather than defaulting to `localhost`.
+
+  An empty string (normally indicating all interfaces) is interpreted
+  as `localhost`, because allowing access to the server's RPC
+  interface to arbitrary connections across the internet is not a
+  good idea.
+
 * **RPC_PORT**
 
   ElectrumX will listen on this port for local RPC connections.
   ElectrumX listens for RPC connections unless this is explicitly set
-  to blank.  The default is appropriate for **COIN** and **NET**
-  (e.g., 8000 for Bitcoin mainnet) if not set.
+  to blank.  The default depends on **COIN** and **NET** (e.g., 8000
+  for Bitcoin mainnet) if not set, as indicated in `lib/coins.py`_.
 
 * **DONATION_ADDRESS**
 
@@ -116,8 +132,10 @@ These environment variables are optional:
   You can place several meta-variables in your banner file, which will be
   replaced before serving to a client.
 
-  + **$VERSION** is replaced with the ElectrumX version you are
-    runnning, such as *ElectrumX 0.9.22*.
+  + **$SERVER_VERSION** is replaced with the ElectrumX version you are
+    running, such as *1.0.10*.
+  + **$SERVER_SUBVERSION** is replaced with the ElectrumX user agent
+    string.  For example, `ElectrumX 1.0.10`.
   + **$DAEMON_VERSION** is replaced with the daemon's version as a
     dot-separated string. For example *0.12.1*.
   + **$DAEMON_SUBVERSION** is replaced with the daemon's user agent
@@ -142,6 +160,22 @@ These environment variables are optional:
   log.  The output is identical to the **sessions** RPC command except
   that **ANON_LOGS** is honoured.  Defaults to 3600.  Set to zero to
   suppress this logging.
+
+* **REORG_LIMIT**
+
+  The maximum number of blocks to be able to handle in a chain
+  reorganisation.  ElectrumX retains some fairly compact undo
+  information for this many blocks in levelDB.  The default is a
+  function of **COIN** and **NET**; for Bitcoin mainnet it is 200.
+
+* **EVENT_LOOP_POLICY**
+
+  The name of an event loop policy to replace the default asyncio
+  policy, if any.  At present only `uvloop` is accepted, in which case
+  you must have installed the `uvloop`_ Python package.
+
+  If you are not sure what this means leave it unset.
+
 
 Resource Usage Limits
 ---------------------
@@ -170,7 +204,7 @@ raise them.
   The Electrum protocol has a flaw in that address histories must be
   served all at once or not at all, an obvious avenue for abuse.
   **MAX_SEND** is a stop-gap until the protocol is improved to admit
-  incremental history requests.  Each history entry is appoximately
+  incremental history requests.  Each history entry is approximately
   100 bytes so the default is equivalent to a history limit of around
   10,000 entries, which should be ample for most legitimate users.  If
   you use a higher default bear in mind one client can request history
@@ -192,7 +226,7 @@ raise them.
 
 * **BANDWIDTH_LIMIT**
 
-  Per-session periodic bandwith usage limit in bytes.  This is a soft,
+  Per-session periodic bandwidth usage limit in bytes.  This is a soft,
   not hard, limit.  Currently the period is hard-coded to be one hour.
   The default limit value is 2 million bytes.
 
@@ -220,7 +254,7 @@ Peer Discovery
 --------------
 
 In response to the `server.peers.subscribe` RPC call, ElectrumX will
-only return peer servers that is has recently connected to and
+only return peer servers that it has recently connected to and
 verified basic functionality.
 
 If you are not running a Tor proxy ElectrumX will be unable to connect
@@ -236,9 +270,15 @@ some of this.
 
 * **PEER_DISCOVERY**
 
-  If not defined, or non-empty, ElectrumX will occasionally connect to
-  and verify its network of peer servers.  Set to empty to disable
-  peer discovery.
+  This environment variable is case-insensitive and defaults to `on`.
+
+  If `on`, ElectrumX will occasionally connect to and verify its
+  network of peer servers.
+
+  If `off`, peer discovery is disabled and a hard-coded default list
+  of servers will be read in and served.  If set to `self` then peer
+  discovery is disabled and the server will only return itself in the
+  peers list.
 
 * **PEER_ANNOUNCE**
 
@@ -367,3 +407,4 @@ your available physical RAM:
   variables is roughly equivalent.
 
 .. _lib/coins.py: https://github.com/kyuupichan/electrumx/blob/master/lib/coins.py
+.. _uvloop: https://pypi.python.org/pypi/uvloop
