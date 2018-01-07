@@ -333,7 +333,7 @@ class Groestlcoin(Coin):
                     'a8297eb614683d3acb62f0703b639023')
     DESERIALIZER = DeserializerSegWit
     P2PKH_VERBYTE = bytes.fromhex("24")
-    P2SH_VERBYTE = bytes.fromhex("05")
+    P2SH_VERBYTES = [bytes.fromhex("05")]
     WIF_BYTE = bytes.fromhex("80")
 
     TX_COUNT = 115900
@@ -437,7 +437,7 @@ class GroestlcoinTestnet(Groestlcoin):
     XPUB_VERBYTES = bytes.fromhex("043587cf")
     XPRV_VERBYTES = bytes.fromhex("04358394")
     P2PKH_VERBYTE = bytes.fromhex("6f")
-    P2SH_VERBYTE = bytes.fromhex("c4")
+    P2SH_VERBYTES = [bytes.fromhex("c4")]
     WIF_BYTE = bytes.fromhex("ef")
     GENESIS_HASH = ('000000ffbb50fc9898cdd36ec163e6ba'
                     '23230164c0052a28876255b7dcf2cd36')
