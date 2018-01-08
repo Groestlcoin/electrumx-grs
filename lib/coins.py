@@ -447,8 +447,8 @@ class GroestlcoinTestnet(Groestlcoin):
     PEERS = [
         'electrum-test1.groestlcoin.org s t',
         'electrum-test2.groestlcoin.org s t',
-        '7frvhgofuf522b5i.onion s t',
-        'aocojvqcybdoxekv.onion s t',
+        '7frvhgofuf522b5i.onion t',
+        'aocojvqcybdoxekv.onion t',
     ]
 
 class BitcoinMixin(object):
