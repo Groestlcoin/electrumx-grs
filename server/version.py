@@ -1,5 +1,5 @@
 # Server name and protocol versions
 
-VERSION = 'ElectrumX-GRS 1.2'
+VERSION = 'ElectrumX-GRS 1.3'
 PROTOCOL_MIN = '0.9'
-PROTOCOL_MAX = '1.1'
+PROTOCOL_MAX = '1.2'

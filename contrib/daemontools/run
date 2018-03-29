@@ -1,3 +1,5 @@
 #!/bin/sh
 echo "Launching ElectrumX-GRS server..."
-exec 2>&1 envdir ./env /bin/sh -c 'envuidgid $USERNAME python3 $ELECTRUMX-GRS'
+USERNAME=$(envdir ./env printenv USERNAME)
+ELECTRUMX-GRS=$(envdir ./env printenv ELECTRUMX-GRS)
+ulimit -n 4000 && exec 2>&1 envdir ./env envuidgid $USERNAME python3 $ELECTRUMX-GRS
