@@ -26,7 +26,7 @@
 
 import pytest
 
-from lib.coins import Litecoin, BitcoinCash, Zcash, Groestlcoin
+from lib.coins import Groestlcoin
 from lib.hash import Base58
 
 addresses = [
