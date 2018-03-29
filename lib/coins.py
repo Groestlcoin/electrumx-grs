@@ -327,7 +327,7 @@ class Groestlcoin(Coin):
     XPRV_VERBYTES = bytes.fromhex("0488ade4")
     GENESIS_HASH = ('00000ac5927c594d49cc0bdb81759d0d'
                     'a8297eb614683d3acb62f0703b639023')
-    DESERIALIZER = DeserializerSegWit
+    DESERIALIZER = lib_tx.DeserializerSegWit
     P2PKH_VERBYTE = bytes.fromhex("24")
     P2SH_VERBYTES = [bytes.fromhex("05")]
     WIF_BYTE = bytes.fromhex("80")
