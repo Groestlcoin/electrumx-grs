@@ -16,12 +16,14 @@ shut it down cleanly first.
 
 It is recommended you run this script with the same environment as
 ElectrumX.  However it is intended to be runnable with just
-DB_DIRECTORY and DB_ENGINE set (COIN defaults as for ElectrumX).
+DB_DIRECTORY, DB_ENGINE, COIN and NET set (COIN defaults as for ElectrumX).
 
 If you use daemon tools, you might run this script like so:
 
    export DB_DIRECTORY=/db
    export DB_ENGINE=rocksdb
+   export COIN=groestlcoin
+   export NET=mainnet
    ./compact_history.py
 
 Depending on your hardware this script may take up to 6 hours to
