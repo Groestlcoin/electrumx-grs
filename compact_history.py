@@ -24,7 +24,7 @@ If you use daemon tools, you might run this script like so:
    export DB_ENGINE=rocksdb
    export COIN=groestlcoin
    export NET=mainnet
-   ./compact_history.py
+   python3 /usr/local/bin/electrumx_compact_history
 
 Depending on your hardware this script may take up to 6 hours to
 complete; it logs progress regularly.
